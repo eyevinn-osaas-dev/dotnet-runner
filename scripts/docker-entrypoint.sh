@@ -72,6 +72,23 @@ if [[ -n "$OSC_ACCESS_TOKEN" && -n "$CONFIG_SVC" ]]; then
   fi
 fi
 
+# ---- Build defaults ----
+# Inject Directory.Build.props to enable ImplicitUsings by default.
+# The dotnet SDK does NOT default ImplicitUsings to 'enable' — only the
+# 'dotnet new' templates set it explicitly. Without this, minimal API code
+# (WebApplication, Environment, etc.) fails to compile. The Condition ensures
+# projects that explicitly set ImplicitUsings are not overridden.
+if [[ ! -f "$BUILD_DIR/Directory.Build.props" ]]; then
+  cat > "$BUILD_DIR/Directory.Build.props" << 'DBPROPS'
+<Project>
+  <PropertyGroup Condition="'$(ImplicitUsings)' == ''">
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+</Project>
+DBPROPS
+  echo "[BUILD] Injected default ImplicitUsings=enable (no Directory.Build.props found)"
+fi
+
 # ---- Build phase ----
 cd "$BUILD_DIR"
 mkdir -p /app/published
