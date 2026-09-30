@@ -18,6 +18,7 @@ A container runner for .NET applications on [Open Source Cloud (OSC)](https://ww
 | `OSC_ENTRY` | No | Override the entry DLL filename inside `/app/published/`. For example, `MyApp.dll`. Without this, the runner auto-detects the first `.dll` in the publish output. |
 | `CONFIG_SVC` | No | Name of an OSC app-config-svc instance to load environment variables from. |
 | `OSC_ACCESS_TOKEN` | No | OSC personal access token. Required when `CONFIG_SVC` is set. |
+| `CONFIG_API_KEY` | No | API key for encrypted parameter store. When set alongside `OSC_ACCESS_TOKEN` and `CONFIG_SVC`, secret parameters are decrypted before being injected as environment variables. |
 
 ## Quick Start
 

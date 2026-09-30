@@ -60,26 +60,51 @@ if [[ "$SOURCE_URL" == *"#"* ]]; then
   SOURCE_URL="${SOURCE_URL%%#*}"
 fi
 
-# Inject token if provided
+# Always parse host, path, and protocol from SOURCE_URL so that they are
+# available for the credential-scrub step regardless of which auth path is taken.
+GIT_HOST="${SOURCE_URL#*://}"
+GIT_HOST="${GIT_HOST%%/*}"   # keep only the hostname (may include user:pass@ for Gitea)
+# Variant with any embedded credentials stripped — used for the persisted
+# remote URL so that PATs never leak into .git/config.
+# When SOURCE_URL has no credentials this is identical to GIT_HOST.
+GIT_HOST_PUBLIC="${GIT_HOST##*@}"
+GIT_PATH="/${SOURCE_URL#*://*/}"
+[[ "/${SOURCE_URL}" == "${GIT_PATH}" ]] && GIT_PATH="/"
+PROTOCOL="${SOURCE_URL%%://*}"
+
+# Build auth args for git clone. Credentials are passed via a scoped
+# http.<url>/.extraheader config override rather than embedded in the clone
+# URL, so they never appear in process args, in git's own error output, or
+# in .git/config.
 GIT_TOKEN="${GIT_TOKEN:-$GITHUB_TOKEN}"
+GIT_AUTH_ARGS=()
 if [[ -n "$GIT_TOKEN" ]]; then
-  GIT_HOST="${SOURCE_URL#*://}"
-  GIT_HOST="${GIT_HOST%%/*}"
-  GIT_PATH="/${SOURCE_URL#*://*/}"
-  [[ "/${SOURCE_URL}" == "${GIT_PATH}" ]] && GIT_PATH="/"
-  if [[ "$SOURCE_URL" == *"#"* ]]; then
-    GIT_PATH="${GIT_PATH%%#*}"
-  fi
-  PROTOCOL="${SOURCE_URL%%://*}"
-  SOURCE_URL="${PROTOCOL}://${GIT_TOKEN}@${GIT_HOST}${GIT_PATH}"
+  AUTH_B64=$(printf '%s' "x-access-token:${GIT_TOKEN}" | base64 | tr -d '\n')
+  GIT_AUTH_ARGS=(-c "http.${PROTOCOL}://${GIT_HOST_PUBLIC}/.extraheader=AUTHORIZATION: basic ${AUTH_B64}")
+elif [[ "$GIT_HOST" != "$GIT_HOST_PUBLIC" ]]; then
+  # Gitea: SOURCE_URL pre-embeds user:pass@host — reuse as Basic-Auth pair.
+  # Use %@* (single %, shortest suffix from the right / last "@") to match
+  # the ##*@ convention used for GIT_HOST_PUBLIC elsewhere in this script —
+  # a password containing a literal "@" must not be truncated.
+  CREDS="${GIT_HOST%@*}"
+  AUTH_B64=$(printf '%s' "$CREDS" | base64 | tr -d '\n')
+  GIT_AUTH_ARGS=(-c "http.${PROTOCOL}://${GIT_HOST_PUBLIC}/.extraheader=AUTHORIZATION: basic ${AUTH_B64}")
 fi
+
+git_scrub_stderr() {
+  "$@" 2> >(sed -r 's/gh[pso]_[A-Za-z0-9]{20,}/[REDACTED]/g; s/([Bb]asic )[A-Za-z0-9+\/=]{8,}/\1[REDACTED]/g' >&2)
+}
 
 rm -rf "$WORK_DIR"
 if [[ -n "$BRANCH" ]]; then
-  git clone --branch "$BRANCH" --depth 1 "$SOURCE_URL" "$WORK_DIR"
+  git_scrub_stderr git "${GIT_AUTH_ARGS[@]}" clone --branch "$BRANCH" --depth 1 "${PROTOCOL}://${GIT_HOST_PUBLIC}${GIT_PATH}" "$WORK_DIR"
 else
-  git clone --depth 1 "$SOURCE_URL" "$WORK_DIR"
+  git_scrub_stderr git "${GIT_AUTH_ARGS[@]}" clone --depth 1 "${PROTOCOL}://${GIT_HOST_PUBLIC}${GIT_PATH}" "$WORK_DIR"
 fi
+
+# Ensure the persisted remote URL is credential-free — belt-and-braces, since
+# the clone URL never carried credentials to begin with.
+git -C "$WORK_DIR" remote set-url origin "${PROTOCOL}://${GIT_HOST_PUBLIC}${GIT_PATH}"
 
 write_commit_info "$WORK_DIR"
 
@@ -90,9 +115,24 @@ if [[ -n "$SUB_PATH" ]]; then
 fi
 
 # ---- Config service phase ----
+if [[ -z "${OSC_ENV:-}" && -n "${OSC_MCP_URL:-}" ]]; then
+  _extracted=$(echo "$OSC_MCP_URL" | sed -n 's|.*\.svc\.\([a-z]*\)\.osaas\.io.*|\1|p')
+  OSC_ENV=${_extracted:-prod}
+fi
+
+if [[ -n "${OSC_ACCESS_TOKEN:-}" && -n "${OSC_ENV:-}" ]]; then
+  _refreshed=$(curl -sf -X POST \
+    "https://token.svc.${OSC_ENV:-prod}.osaas.io/runner-token/refresh" \
+    -H "Authorization: Bearer ${OSC_ACCESS_TOKEN}" \
+    -H "Content-Type: application/json" || true)
+  if [[ -n "${_refreshed}" ]]; then
+    OSC_ACCESS_TOKEN=$(echo "$_refreshed" | grep -o '"token":"[^"]*"' | cut -d'"' -f4 || echo "$OSC_ACCESS_TOKEN")
+  fi
+fi
+
 if [[ -n "$OSC_ACCESS_TOKEN" && -n "$CONFIG_SVC" ]]; then
   echo "[CONFIG] Loading environment variables from config service '$CONFIG_SVC'"
-  config_env_output=$(npx -y @osaas/cli@latest web config-to-env "$CONFIG_SVC" 2>&1)
+  config_env_output=$(npx -y @osaas/cli@latest web config-to-env ${OSC_ENV:+--env "$OSC_ENV"} "$CONFIG_SVC" 2>&1)
   config_exit=$?
   if [ $config_exit -eq 0 ]; then
     valid_exports=$(echo "$config_env_output" | grep "^export [A-Za-z_][A-Za-z0-9_]*=")
