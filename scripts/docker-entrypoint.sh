@@ -132,8 +132,16 @@ fi
 
 if [[ -n "$OSC_ACCESS_TOKEN" && -n "$CONFIG_SVC" ]]; then
   echo "[CONFIG] Loading environment variables from config service '$CONFIG_SVC'"
-  config_env_output=$(npx -y @osaas/cli@latest web config-to-env ${OSC_ENV:+--env "$OSC_ENV"} "$CONFIG_SVC" 2>&1)
-  config_exit=$?
+  # Wrapped with `timeout 60s`: if $CONFIG_SVC doesn't resolve, or the npx
+  # invocation itself hangs, this must not block boot forever. The command is
+  # run as the condition of an `if` so a non-zero exit (including 124 on
+  # timeout) does not trip `set -e` above and abort the whole script — that
+  # would otherwise skip the ERROR logging below entirely.
+  if config_env_output=$(timeout 60s npx -y @osaas/cli@latest web config-to-env ${OSC_ENV:+--env "$OSC_ENV"} "$CONFIG_SVC" 2>&1); then
+    config_exit=0
+  else
+    config_exit=$?
+  fi
   if [ $config_exit -eq 0 ]; then
     valid_exports=$(echo "$config_env_output" | grep "^export [A-Za-z_][A-Za-z0-9_]*=")
     if [ -n "$valid_exports" ]; then
