@@ -175,10 +175,13 @@ fi
 cd "$BUILD_DIR"
 mkdir -p /app/published
 
+# Each build command is followed by `|| BUILD_EXIT=$?` rather than a separate
+# `BUILD_EXIT=$?` line: under `set -e` a failing command aborts the script
+# before the next line runs, which would make the failed-mode branch below
+# unreachable (container crash-loops instead of serving the error page).
 BUILD_EXIT=0
 if [[ -n "$OSC_BUILD_CMD" ]]; then
-  eval "$OSC_BUILD_CMD"
-  BUILD_EXIT=$?
+  eval "$OSC_BUILD_CMD" || BUILD_EXIT=$?
 else
   # Auto-detect project: look for *.sln first, then *.csproj
   SLN_FILE=$(find . -maxdepth 2 -name "*.sln" | head -1)
@@ -186,16 +189,13 @@ else
 
   if [[ -n "$SLN_FILE" ]]; then
     echo "[BUILD] Found solution file: $SLN_FILE"
-    dotnet publish "$SLN_FILE" -c Release -p:PublishDir=/app/published
-    BUILD_EXIT=$?
+    dotnet publish "$SLN_FILE" -c Release -p:PublishDir=/app/published || BUILD_EXIT=$?
   elif [[ -n "$CSPROJ_FILE" ]]; then
     echo "[BUILD] Found project file: $CSPROJ_FILE"
-    dotnet publish "$CSPROJ_FILE" -c Release -p:PublishDir=/app/published
-    BUILD_EXIT=$?
+    dotnet publish "$CSPROJ_FILE" -c Release -p:PublishDir=/app/published || BUILD_EXIT=$?
   else
     echo "[BUILD] No .sln or .csproj found, attempting dotnet publish ." >&2
-    dotnet publish . -c Release -p:PublishDir=/app/published
-    BUILD_EXIT=$?
+    dotnet publish . -c Release -p:PublishDir=/app/published || BUILD_EXIT=$?
   fi
 fi
 
