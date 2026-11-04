@@ -137,7 +137,7 @@ if [[ -n "$OSC_ACCESS_TOKEN" && -n "$CONFIG_SVC" ]]; then
   # run as the condition of an `if` so a non-zero exit (including 124 on
   # timeout) does not trip `set -e` above and abort the whole script — that
   # would otherwise skip the ERROR logging below entirely.
-  if config_env_output=$(timeout 60s npx -y @osaas/cli@latest web config-to-env ${OSC_ENV:+--env "$OSC_ENV"} "$CONFIG_SVC" 2>&1); then
+  if config_env_output=$(timeout 60s npx -y "@osaas/cli@${OSAAS_CLI_VERSION:?OSAAS_CLI_VERSION must be set (pinned in the Dockerfile)}" web config-to-env ${OSC_ENV:+--env "$OSC_ENV"} "$CONFIG_SVC" 2>&1); then
     config_exit=0
   else
     config_exit=$?
