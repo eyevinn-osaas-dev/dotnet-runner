@@ -18,7 +18,25 @@ A container runner for .NET applications on [Open Source Cloud (OSC)](https://ww
 | `OSC_ENTRY` | No | Override the entry DLL filename inside `/app/published/`. For example, `MyApp.dll`. Without this, the runner auto-detects the first `.dll` in the publish output. |
 | `CONFIG_SVC` | No | Name of an OSC app-config-svc instance to load environment variables from. |
 | `OSC_ACCESS_TOKEN` | No | OSC personal access token. Required when `CONFIG_SVC` is set. |
+| `OSC_REFRESH_TOKEN` | Set by the runner | Set to the original `OSC_ACCESS_TOKEN` when the runner is started with a runner refresh token. Exchange it for a fresh 1 hour token at runtime (see below). Not set when the token is rejected as expired, revoked or not a runner refresh token. |
 | `CONFIG_API_KEY` | No | API key for encrypted parameter store. When set alongside `OSC_ACCESS_TOKEN` and `CONFIG_SVC`, secret parameters are decrypted before being injected as environment variables. |
+
+### Renewing the access token
+
+When `OSC_ACCESS_TOKEN` and `OSC_ENV` are set, the runner exchanges the token for a fresh 1 hour token at startup and `config-to-env` authenticates with it. Your app still sees the original `OSC_ACCESS_TOKEN`. To get a fresh token from inside your app, post `OSC_REFRESH_TOKEN` to the token service:
+
+```csharp
+var env = Environment.GetEnvironmentVariable("OSC_ENV") ?? "prod";
+var body = JsonSerializer.Serialize(new { token = Environment.GetEnvironmentVariable("OSC_REFRESH_TOKEN") });
+using var http = new HttpClient();
+var res = await http.PostAsync(
+    $"https://token.svc.{env}.osaas.io/runner-token/refresh",
+    new StringContent(body, Encoding.UTF8, "application/json"));
+res.EnsureSuccessStatusCode();
+using var doc = JsonDocument.Parse(await res.Content.ReadAsStringAsync());
+var token = doc.RootElement.GetProperty("token").GetString();      // valid for expiresIn seconds
+var expiresIn = doc.RootElement.GetProperty("expiresIn").GetInt32(); // 3600
+```
 
 ## Quick Start
 

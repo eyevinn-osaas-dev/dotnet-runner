@@ -132,15 +132,68 @@ if [[ -z "${OSC_ENV:-}" && -n "${OSC_MCP_URL:-}" ]]; then
   OSC_ENV=${_extracted:-prod}
 fi
 
+# BEGIN runner-refresh
+# Exchange the long-lived runner refresh token for a fresh 1h access token.
+# The fresh token is used ONLY for config-to-env (via the non-exported
+# config_access_token). The app keeps its OSC_ACCESS_TOKEN unchanged and
+# additionally receives the original token as OSC_REFRESH_TOKEN.
+config_access_token=""
 if [[ -n "${OSC_ACCESS_TOKEN:-}" && -n "${OSC_ENV:-}" ]]; then
-  _refreshed=$(curl -sf -X POST \
-    "https://token.svc.${OSC_ENV:-prod}.osaas.io/runner-token/refresh" \
-    -H "Authorization: Bearer ${OSC_ACCESS_TOKEN}" \
-    -H "Content-Type: application/json" || true)
-  if [[ -n "${_refreshed}" ]]; then
-    OSC_ACCESS_TOKEN=$(echo "$_refreshed" | grep -o '"token":"[^"]*"' | cut -d'"' -f4 || echo "$OSC_ACCESS_TOKEN")
+  refresh_http=""
+  refresh_json=""
+  refresh_ok=0
+  refresh_skip_export=0
+  for refresh_attempt in 1 2 3; do
+    refresh_out_file=$(mktemp)
+    # The request body is read from a 0600 temp file so the token never
+    # appears in curl's argv (visible in the pod process list).
+    refresh_body_file=$(mktemp)
+    chmod 600 "$refresh_body_file"
+    printf '{"token":"%s"}' "$OSC_ACCESS_TOKEN" > "$refresh_body_file"
+    curl -s --max-time 10 -w "\n%{http_code}" -X POST \
+      "https://token.svc.${OSC_ENV}.osaas.io/runner-token/refresh" \
+      -H "Content-Type: application/json" \
+      --data @"$refresh_body_file" > "$refresh_out_file" 2>/dev/null || true
+    refresh_resp=$(cat "$refresh_out_file") || refresh_resp=""
+    rm -f "$refresh_out_file" "$refresh_body_file"
+    refresh_http=$(printf '%s\n' "$refresh_resp" | tail -n 1) || refresh_http=""
+    refresh_json=$(printf '%s\n' "$refresh_resp" | sed '$d') || refresh_json=""
+    # Definitive answers (200, 401) stop the retries; 5xx/timeouts are retried.
+    if [ "$refresh_http" = "200" ] || [ "$refresh_http" = "401" ]; then
+      break
+    fi
+    if [ "$refresh_attempt" -lt 3 ]; then
+      sleep 3
+    fi
+  done
+
+  if [ "$refresh_http" = "200" ]; then
+    config_access_token=$(printf '%s' "$refresh_json" | jq -r '.token // empty' 2>/dev/null) || config_access_token=""
+    if [ -n "$config_access_token" ]; then
+      refresh_ok=1
+      echo "[CONFIG] Refreshed access token via runner refresh token"
+    fi
+  elif [ "$refresh_http" = "401" ]; then
+    refresh_code=$(printf '%s' "$refresh_json" | jq -r '.code // empty' 2>/dev/null) || refresh_code=""
+    case "$refresh_code" in
+      refresh_token_expired|refresh_token_revoked)
+        echo "[CONFIG] WARNING: runner refresh token is $refresh_code" >&2
+        refresh_skip_export=1
+        ;;
+      refresh_token_invalid)
+        echo "[CONFIG] WARNING: OSC_ACCESS_TOKEN is not a runner refresh token, exchange skipped" >&2
+        refresh_skip_export=1
+        ;;
+    esac
+  fi
+  if [ "$refresh_ok" -eq 0 ] && [ "$refresh_skip_export" -eq 0 ]; then
+    echo "[CONFIG] WARNING: runner token exchange failed (HTTP '${refresh_http}'), using the original token" >&2
+  fi
+  if [ "$refresh_skip_export" -eq 0 ]; then
+    export OSC_REFRESH_TOKEN="$OSC_ACCESS_TOKEN"
   fi
 fi
+# END runner-refresh
 
 # BEGIN config-load
 if [[ -n "$OSC_ACCESS_TOKEN" && -n "$CONFIG_SVC" ]]; then
@@ -163,7 +216,7 @@ if [[ -n "$OSC_ACCESS_TOKEN" && -n "$CONFIG_SVC" ]]; then
   while true; do
     config_failed=0
     valid_exports=""
-    if config_env_output=$(timeout 60s npx -y "@osaas/cli@${OSAAS_CLI_VERSION:?OSAAS_CLI_VERSION must be set (pinned in the Dockerfile)}" web config-to-env ${OSC_ENV:+--env "$OSC_ENV"} "$CONFIG_SVC" 2>"$config_err_file"); then
+    if config_env_output=$(OSC_ACCESS_TOKEN="${config_access_token:-$OSC_ACCESS_TOKEN}" timeout 60s npx -y "@osaas/cli@${OSAAS_CLI_VERSION:?OSAAS_CLI_VERSION must be set (pinned in the Dockerfile)}" web config-to-env ${OSC_ENV:+--env "$OSC_ENV"} "$CONFIG_SVC" 2>"$config_err_file"); then
       config_exit=0
     else
       config_exit=$?
